@@ -3,7 +3,10 @@
 // this is the durable replacement for the public allorigins.win proxy.
 
 exports.handler = async function (event) {
-  const symbol = event.queryStringParameters && event.queryStringParameters.symbol;
+  const params = event.queryStringParameters || {};
+  const symbol = params.symbol;
+  const interval = params.interval || "1d";
+  const range = params.range || "1y";
 
   if (!symbol) {
     return {
@@ -15,7 +18,7 @@ exports.handler = async function (event) {
 
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
     symbol
-  )}?interval=5m&range=5d`;
+  )}?interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(range)}`;
 
   try {
     const res = await fetch(url, {
