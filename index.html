@@ -185,6 +185,14 @@ input:focus,select:focus{border-color:var(--cyan);}
 <div class="page active" id="page-signals">
 <div class="main-content">
   <div class="card">
+    <div class="card-title">Mode</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:2px;">
+      <button class="btn" id="mode-day" style="margin:0;padding:9px;background:transparent;border:1px solid var(--border2);color:var(--muted);" onclick="setMode('day')">DAY (5m)</button>
+      <button class="btn" id="mode-swing" style="margin:0;padding:9px;background:var(--cyan);color:#000;" onclick="setMode('swing')">SWING (Daily)</button>
+    </div>
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:.5rem;color:var(--muted);text-align:center;" id="mode-desc">Daily bars, wider stops, multi-day holds</div>
+  </div>
+  <div class="card">
     <div class="card-title">Settings</div>
     <label>Ticker</label>
     <div style="display:grid;grid-template-columns:1fr auto;gap:5px;margin-bottom:6px;">
@@ -197,9 +205,9 @@ input:focus,select:focus{border-color:var(--cyan);}
       <button class="btn btn-gh" style="margin:0;padding:7px;" id="auto-btn" onclick="toggleAuto()">AUTO OFF</button>
     </div>
     <label>Stop Loss %</label>
-    <input type="number" id="sl" value="2.0" min="0.1" max="10" step="0.1">
+    <input type="number" id="sl" value="6.0" min="0.1" max="30" step="0.1">
     <label>Take Profit %</label>
-    <input type="number" id="tp" value="4.0" min="0.1" max="20" step="0.1">
+    <input type="number" id="tp" value="15.0" min="0.1" max="60" step="0.1">
   </div>
   <div class="port-strip">
     <div class="pbox"><div class="plbl">Portfolio</div><div class="pval cyan" id="ph-t">$10,000</div></div>
@@ -283,6 +291,7 @@ let alerts=JSON.parse(localStorage.getItem('alerts_v5')||'[]');
 let curSig=null,curOrd='';
 let lastPrices={};
 let autoTimer=null;
+let mode='swing'; // 'day' = 5min intraday, 'swing' = daily bars
 
 // ════════════════════════════════════════════════════════════════════════════════
 // INDICATORS
@@ -299,7 +308,8 @@ function stoch(c,h,l,k=14,d=3){if(c.length<k)return[50,50];const hh=Math.max(...
 // STRATEGIES
 // ════════════════════════════════════════════════════════════════════════════════
 function runAllStrategies(closes,highs,lows,price,vwap,volumes){
-  const r=rsi(closes),e9=ema(closes,9),e21=ema(closes,21),e50=ema(closes,50);
+  const emaP=mode==='swing'?[20,50,200]:[9,21,50];
+  const r=rsi(closes),e9=ema(closes,emaP[0]),e21=ema(closes,emaP[1]),e50=ema(closes,emaP[2]);
   const [bu,bm,bl]=bb(closes),md=macd(closes),[sk,sd]=stoch(closes,highs,lows);
   
   // RSI+VWAP
@@ -325,7 +335,7 @@ function runAllStrategies(closes,highs,lows,price,vwap,volumes){
   
   const strats={
     'RSI+VWAP':{action:rsi_act,confidence:Math.min(95,Math.round(rsi_conf)),reason:`RSI ${r.toFixed(1)} | VWAP ${price>vwap?'above':'below'} $${vwap.toFixed(2)}`},
-    'MA Cross':{action:ma_act,confidence:Math.min(95,Math.round(ma_conf)),reason:`EMA9 $${e9.toFixed(2)} vs EMA21 $${e21.toFixed(2)}`},
+    'MA Cross':{action:ma_act,confidence:Math.min(95,Math.round(ma_conf)),reason:`EMA${emaP[0]} $${e9.toFixed(2)} vs EMA${emaP[1]} $${e21.toFixed(2)}`},
     'Momentum':{action:mom_act,confidence:Math.min(95,Math.round(mom_conf)),reason:`MACD ${md[2]>0?'+':''}${md[2].toFixed(4)}`},
     'Mean Rev':{action:mr_act,confidence:Math.min(95,Math.round(mr_conf)),reason:`BB ${price<bl?'below':'above'} | Stoch ${sk.toFixed(0)}`},
   };
@@ -345,14 +355,16 @@ function runAllStrategies(closes,highs,lows,price,vwap,volumes){
 // FETCH & ANALYZE
 // ════════════════════════════════════════════════════════════════════════════════
 async function fetchYahoo(ticker){
+  const interval=mode==='swing'?'1d':'5m';
+  const range=mode==='swing'?'1y':'5d';
   // 1. Primary: server-side Netlify Function (no CORS issue, no third-party proxy dependency)
   try{
-    const r=await fetch(`/.netlify/functions/quote?symbol=${encodeURIComponent(ticker)}`,{signal:AbortSignal.timeout(10000)});
+    const r=await fetch(`/.netlify/functions/quote?symbol=${encodeURIComponent(ticker)}&interval=${interval}&range=${range}`,{signal:AbortSignal.timeout(10000)});
     if(!r.ok)throw new Error('function unavailable');
     return await r.json();
   }catch(e){}
   // 2. Fallback: direct Yahoo call (works if Yahoo ever allows it)
-  const url=`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=5m&range=5d`;
+  const url=`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=${interval}&range=${range}`;
   try{
     const r2=await fetch(url,{signal:AbortSignal.timeout(8000)});
     if(!r2.ok)throw new Error('blocked');
@@ -363,6 +375,18 @@ async function fetchYahoo(ticker){
   const r3=await fetch(proxied,{signal:AbortSignal.timeout(12000)});
   if(!r3.ok)throw new Error('Data fetch failed — check connection');
   return await r3.json();
+}
+function setMode(m){
+  mode=m;
+  document.getElementById('mode-day').style.background=m==='day'?'var(--cyan)':'transparent';
+  document.getElementById('mode-day').style.color=m==='day'?'#000':'var(--muted)';
+  document.getElementById('mode-swing').style.background=m==='swing'?'var(--cyan)':'transparent';
+  document.getElementById('mode-swing').style.color=m==='swing'?'#000':'var(--muted)';
+  document.getElementById('mode-desc').textContent=m==='swing'?'Daily bars, wider stops, multi-day holds':'5-min bars, tight stops, same-day exits';
+  document.getElementById('sl').value=m==='swing'?'6.0':'2.0';
+  document.getElementById('tp').value=m==='swing'?'15.0':'4.0';
+  if(autoTimer){clearInterval(autoTimer);autoTimer=null;document.getElementById('auto-btn').textContent='AUTO OFF';document.getElementById('auto-btn').style.color='var(--muted)';document.getElementById('auto-btn').style.borderColor='var(--border2)';}
+  document.getElementById('auto-btn').style.display=m==='swing'?'none':'block';
 }
 async function runSignal(){
   const ticker=document.getElementById('ticker').value.trim().toUpperCase();
@@ -447,7 +471,7 @@ function renderSignal(s){
     
     <div class="ind-grid">
       <div class="ind-box"><div class="ind-name">RSI 14</div><div class="ind-val">${s.indicators.rsi}</div></div>
-      <div class="ind-box"><div class="ind-name">EMA 9/21</div><div class="ind-val">$${s.indicators.ema9}</div></div>
+      <div class="ind-box"><div class="ind-name">EMA ${mode==='swing'?'20/50':'9/21'}</div><div class="ind-val">$${s.indicators.ema9}</div></div>
       <div class="ind-box"><div class="ind-name">MACD</div><div class="ind-val">${s.indicators.macd_hist}</div></div>
       <div class="ind-box"><div class="ind-name">Stoch K/D</div><div class="ind-val">${s.indicators.stoch_k}/${s.indicators.stoch_d}</div></div>
     </div>
@@ -583,6 +607,7 @@ function playAlert(){try{const c=new(window.AudioContext||window.webkitAudioCont
 setInterval(()=>document.getElementById('clock').textContent=new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),1000);
 updateBadge();
 updatePortStrip();
+setMode('swing');
 </script>
 </body>
 </html>
