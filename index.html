@@ -177,6 +177,7 @@ input:focus,select:focus{border-color:var(--cyan);}
   <button class="nt" onclick="showPage('alerts')">🔔 Alerts <span class="nbadge" id="alert-badge">0</span></button>
   <button class="nt" onclick="showPage('portfolio')">💼 Portfolio</button>
   <button class="nt" onclick="showPage('coach')">🎯 Coach</button>
+  <button class="nt" onclick="showPage('backtest')">🔬 Backtest</button>
 </div>
 
 <div class="pages">
@@ -260,6 +261,36 @@ input:focus,select:focus{border-color:var(--cyan);}
   <div class="card">
     <div id="coach-content"><div class="empty">Take at least 1 paper trade to see stats.</div></div>
   </div>
+</div>
+</div>
+
+<!-- ════ BACKTEST ════ -->
+<div class="page" id="page-backtest">
+<div class="main-content">
+  <div class="card">
+    <div class="card-title">Backtest Settings</div>
+    <label>Ticker</label>
+    <div style="display:grid;grid-template-columns:1fr auto;gap:5px;margin-bottom:6px;">
+      <input type="text" id="bt-ticker" value="QQQ" placeholder="QQQ" maxlength="6" style="text-transform:uppercase;margin-bottom:0;">
+      <button class="btn btn-c" onclick="runBacktest()" style="width:auto;padding:8px 12px;margin-bottom:0;">RUN</button>
+    </div>
+    <label>History</label>
+    <select id="bt-years" style="margin-bottom:6px;">
+      <option value="2y">2 Years</option>
+      <option value="5y" selected>5 Years</option>
+      <option value="10y">10 Years</option>
+    </select>
+    <label>Min Consensus (votes out of 4)</label>
+    <select id="bt-votes" style="margin-bottom:6px;">
+      <option value="2">2+ (all signals, noisiest)</option>
+      <option value="3" selected>3+ (Moderate + Strong)</option>
+      <option value="4">4 only (Strong only)</option>
+    </select>
+    <label>Max Hold (trading days)</label>
+    <input type="number" id="bt-maxhold" value="20" min="3" max="90" step="1">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:.5rem;color:var(--muted);margin-top:6px;line-height:1.5;">Uses your current Stop Loss % / Take Profit % from the Signals tab. Entry simulated at next day's open (not the signal day's close) to avoid lookahead bias. Same-day stop+target hit assumes stop first (conservative).</div>
+  </div>
+  <div id="bt-area"><div class="empty">Set parameters and click RUN</div></div>
 </div>
 </div>
 
@@ -581,6 +612,155 @@ function updatePortPage(){const pos=Object.entries(portfolio.positions);document
 // COACH
 // ════════════════════════════════════════════════════════════════════════════════
 function loadCoach(){const closed=portfolio.trades.filter(t=>t.pnl!==0);const wins=closed.filter(t=>t.pnl>0);const c=document.getElementById('coach-content');if(!closed.length){c.innerHTML='<div class="empty">Take 1+ trades to see stats</div>';return;}const wr=Math.round(wins.length/closed.length*100);const tp=closed.reduce((a,t)=>a+t.pnl,0);c.innerHTML=`<div style="display:flex;flex-direction:column;gap:8px;"><div style="padding:9px;background:var(--bg3);border-radius:7px;border:1px solid var(--border);"><div style="font-family:'IBM Plex Mono',monospace;font-size:.55rem;color:var(--muted);margin-bottom:3px;">PERFORMANCE</div><div style="font-family:'Bebas Neue',sans-serif;font-size:1.3rem;color:${wr>=50?'var(--green)':'var(--red)'};">${wr}% Win Rate</div><div style="font-family:'IBM Plex Mono',monospace;font-size:.56rem;color:var(--muted);">${wins.length}W / ${closed.length-wins.length}L | Total: ${tp>=0?'+':''}$${tp.toFixed(2)}</div></div></div>`;}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// BACKTEST
+// ════════════════════════════════════════════════════════════════════════════════
+function simulateBacktest(dates,opens,highs,lows,closes,sl,tp,minVotes,maxHoldDays){
+  const trades=[];
+  const emaP=[20,50,200];
+  let i=210;
+  const n=closes.length;
+  while(i<n-1){
+    const c=closes.slice(0,i+1),h=highs.slice(0,i+1),l=lows.slice(0,i+1);
+    const price=c[c.length-1];
+    const vwap=c.slice(-20).reduce((a,v)=>a+v,0)/Math.min(20,c.length);
+    const analysis=runAllStrategies(c,h,l,price,vwap,[]);
+    const cons=analysis.consensus;
+    const votes=Math.max(cons.buy_votes,cons.sell_votes);
+    if(cons.action!=='HOLD'&&votes>=minVotes&&i+1<n){
+      const entryIdx=i+1;
+      const entryPrice=opens[entryIdx]||closes[entryIdx];
+      const dir=cons.action;
+      const stopPrice=dir==='BUY'?entryPrice*(1-sl/100):entryPrice*(1+sl/100);
+      const targetPrice=dir==='BUY'?entryPrice*(1+tp/100):entryPrice*(1-tp/100);
+      let exitIdx=-1,exitPrice=0,reason='timeout';
+      for(let j=entryIdx;j<Math.min(n,entryIdx+maxHoldDays);j++){
+        const hi=highs[j],lo=lows[j];
+        const hitStop=dir==='BUY'?lo<=stopPrice:hi>=stopPrice;
+        const hitTarget=dir==='BUY'?hi>=targetPrice:lo<=targetPrice;
+        if(hitStop){exitIdx=j;exitPrice=stopPrice;reason=hitTarget?'stop (same-day target also hit)':'stop';break;}
+        if(hitTarget){exitIdx=j;exitPrice=targetPrice;reason='target';break;}
+      }
+      if(exitIdx===-1){exitIdx=Math.min(n-1,entryIdx+maxHoldDays-1);exitPrice=closes[exitIdx];reason='timeout';}
+      const retPct=dir==='BUY'?(exitPrice-entryPrice)/entryPrice*100:(entryPrice-exitPrice)/entryPrice*100;
+      trades.push({entryDate:dates[entryIdx],exitDate:dates[exitIdx],dir,entryPrice,exitPrice,retPct,reason,daysHeld:exitIdx-entryIdx,strength:cons.strength,votes});
+      i=exitIdx+1;
+    }else{i++;}
+  }
+  return trades;
+}
+function computeBtStats(trades,closes){
+  if(!trades.length)return null;
+  const wins=trades.filter(t=>t.retPct>0),losses=trades.filter(t=>t.retPct<=0);
+  const winRate=wins.length/trades.length*100;
+  const avgWin=wins.length?wins.reduce((a,t)=>a+t.retPct,0)/wins.length:0;
+  const avgLoss=losses.length?losses.reduce((a,t)=>a+t.retPct,0)/losses.length:0;
+  let equity=10000;const curve=[10000];
+  trades.forEach(t=>{equity*=(1+t.retPct/100);curve.push(equity);});
+  const grossProfit=wins.reduce((a,t)=>a+t.retPct,0),grossLoss=Math.abs(losses.reduce((a,t)=>a+t.retPct,0));
+  const profitFactor=grossLoss>0?grossProfit/grossLoss:(grossProfit>0?99:0);
+  let peak=curve[0],maxDD=0;
+  curve.forEach(v=>{if(v>peak)peak=v;const dd=(peak-v)/peak*100;if(dd>maxDD)maxDD=dd;});
+  const buyHoldReturn=(closes[closes.length-1]-closes[0])/closes[0]*100;
+  const avgDays=trades.reduce((a,t)=>a+t.daysHeld,0)/trades.length;
+  return{count:trades.length,winRate,avgWin,avgLoss,profitFactor,maxDD,finalEquity:equity,totalReturnPct:(equity-10000)/10000*100,buyHoldReturn,curve,avgDays};
+}
+function drawEquityCurve(canvasId,curve){
+  const cv=document.getElementById(canvasId);if(!cv)return;
+  const ctx=cv.getContext('2d');
+  const w=cv.width=cv.offsetWidth*2,h=cv.height=cv.offsetHeight*2;
+  ctx.clearRect(0,0,w,h);
+  const min=Math.min(...curve),max=Math.max(...curve);
+  const pad=20;
+  ctx.strokeStyle='#00e5ff';ctx.lineWidth=3;ctx.beginPath();
+  curve.forEach((v,i)=>{
+    const x=pad+(w-2*pad)*(i/(curve.length-1));
+    const y=h-pad-(h-2*pad)*((v-min)/(max-min||1));
+    if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+  });
+  ctx.stroke();
+  ctx.strokeStyle='#4a6a85';ctx.lineWidth=1;ctx.setLineDash([4,4]);
+  const zeroY=h-pad-(h-2*pad)*((10000-min)/(max-min||1));
+  ctx.beginPath();ctx.moveTo(pad,zeroY);ctx.lineTo(w-pad,zeroY);ctx.stroke();
+  ctx.setLineDash([]);
+}
+async function runBacktest(){
+  const ticker=document.getElementById('bt-ticker').value.trim().toUpperCase();
+  if(!ticker)return;
+  const years=document.getElementById('bt-years').value;
+  const minVotes=parseInt(document.getElementById('bt-votes').value);
+  const maxHoldDays=parseInt(document.getElementById('bt-maxhold').value);
+  const sl=parseFloat(document.getElementById('sl').value)||6;
+  const tp=parseFloat(document.getElementById('tp').value)||15;
+  const restoreMode=mode; // backtest always runs on daily bars — force swing EMA periods, restore after
+  mode='swing';
+  document.getElementById('bt-area').innerHTML='<div class="loading"><div class="spinner"></div>Fetching history and simulating…</div>';
+  try{
+    let d;
+    try{
+      const r=await fetch(`/.netlify/functions/quote?symbol=${encodeURIComponent(ticker)}&interval=1d&range=${years}`,{signal:AbortSignal.timeout(15000)});
+      if(!r.ok)throw new Error('function unavailable');
+      d=await r.json();
+    }catch(e){
+      const url=`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=${years}`;
+      const proxied=`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+      const r3=await fetch(proxied,{signal:AbortSignal.timeout(15000)});
+      if(!r3.ok)throw new Error('Data fetch failed');
+      d=await r3.json();
+    }
+    if(!d.chart.result||!d.chart.result.length)throw new Error('No data');
+    const res=d.chart.result[0];
+    const ts=res.timestamp,q=res.indicators.quote[0];
+    const dates=ts.map(t=>new Date(t*1000).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}));
+    const opens=q.open,highs=q.high,lows=q.low,closes=q.close;
+    // filter out nulls by forward-filling minimal gaps
+    for(let k=1;k<closes.length;k++){
+      if(closes[k]==null)closes[k]=closes[k-1];
+      if(opens[k]==null)opens[k]=closes[k];
+      if(highs[k]==null)highs[k]=closes[k];
+      if(lows[k]==null)lows[k]=closes[k];
+    }
+    if(closes.length<220){document.getElementById('bt-area').innerHTML='<div class="empty">Not enough history (need 220+ trading days). Try a longer range.</div>';return;}
+    const trades=simulateBacktest(dates,opens,highs,lows,closes,sl,tp,minVotes,maxHoldDays);
+    const stats=computeBtStats(trades,closes.slice(210));
+    mode=restoreMode;
+    if(!stats){document.getElementById('bt-area').innerHTML=`<div class="empty">No trades triggered at ${minVotes}+ votes over this period. Try lowering the vote threshold.</div>`;return;}
+    renderBacktest(ticker,stats,trades,sl,tp,minVotes);
+  }catch(e){
+    mode=restoreMode;
+    document.getElementById('bt-area').innerHTML=`<div class="empty">⚠ ${e.message}</div>`;
+  }
+}
+function renderBacktest(ticker,s,trades,sl,tp,minVotes){
+  const edge=s.totalReturnPct-s.buyHoldReturn;
+  let html=`<div class="card">
+    <div class="card-title">${ticker} — ${s.count} Trades</div>
+    <div class="sz-box" style="grid-template-columns:1fr 1fr;">
+      <div class="sz-item"><div class="sz-lbl">Win Rate</div><div class="sz-val ${s.winRate>=50?'green':'red'}">${s.winRate.toFixed(0)}%</div></div>
+      <div class="sz-item"><div class="sz-lbl">Profit Factor</div><div class="sz-val ${s.profitFactor>=1.3?'green':s.profitFactor>=1?'yellow':'red'}">${s.profitFactor.toFixed(2)}</div></div>
+      <div class="sz-item"><div class="sz-lbl">Avg Win</div><div class="sz-val green">+${s.avgWin.toFixed(2)}%</div></div>
+      <div class="sz-item"><div class="sz-lbl">Avg Loss</div><div class="sz-val red">${s.avgLoss.toFixed(2)}%</div></div>
+      <div class="sz-item"><div class="sz-lbl">Max Drawdown</div><div class="sz-val red">-${s.maxDD.toFixed(1)}%</div></div>
+      <div class="sz-item"><div class="sz-lbl">Avg Hold</div><div class="sz-val">${s.avgDays.toFixed(0)}d</div></div>
+    </div>
+    <div style="margin-top:10px;padding:9px;background:var(--bg3);border-radius:7px;border:1px solid ${edge>=0?'rgba(0,230,118,.3)':'rgba(255,23,68,.3)'};">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:.55rem;color:var(--muted);margin-bottom:3px;">STRATEGY vs BUY &amp; HOLD (same period)</div>
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:1.2rem;color:${s.totalReturnPct>=0?'var(--green)':'var(--red)'};">Strategy: ${s.totalReturnPct>=0?'+':''}${s.totalReturnPct.toFixed(1)}%</div>
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:.6rem;color:var(--muted);">Buy &amp; Hold: ${s.buyHoldReturn>=0?'+':''}${s.buyHoldReturn.toFixed(1)}% | Edge: <span style="color:${edge>=0?'var(--green)':'var(--red)'};">${edge>=0?'+':''}${edge.toFixed(1)}%</span></div>
+    </div>
+    <canvas id="bt-canvas" style="width:100%;height:120px;margin-top:10px;background:var(--bg);border-radius:5px;"></canvas>
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:.5rem;color:var(--muted);text-align:center;margin-top:3px;">Equity curve — $10,000 start, compounded per trade</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Trade Log (most recent 30)</div>
+    <table class="tbl"><thead><tr><th>In</th><th>Dir</th><th>Ret%</th><th>Days</th><th>Reason</th></tr></thead><tbody>
+    ${trades.slice(-30).reverse().map(t=>`<tr><td>${t.entryDate}</td><td class="${t.dir==='BUY'?'win':'loss'}">${t.dir}</td><td class="${t.retPct>=0?'win':'loss'}">${t.retPct>=0?'+':''}${t.retPct.toFixed(1)}%</td><td>${t.daysHeld}</td><td style="color:var(--muted);">${t.reason}</td></tr>`).join('')}
+    </tbody></table>
+  </div>`;
+  document.getElementById('bt-area').innerHTML=html;
+  drawEquityCurve('bt-canvas',s.curve);
+}
 
 // ════════════════════════════════════════════════════════════════════════════════
 // UI HELPERS
